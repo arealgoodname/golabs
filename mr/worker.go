@@ -34,7 +34,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the master.
-	CallExample()
+	ApplyCall()
 
 }
 
@@ -43,13 +43,13 @@ func Worker(mapf func(string, string) []KeyValue,
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func CallExample() {
+func ApplyCall() {
 
 	// declare an argument structure.
 	args := new(Assign) //实际上worker不需要给信息
 
 	// declare a reply structure.
-	reply := arg
+	reply := args
 
 	// send the RPC request, wait for the reply.
 	call("Master.Apply", &args, &reply)

@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -10,7 +11,8 @@ import (
 
 type Master struct {
 	// Your definitions here.
-
+	//谁没被map 
+	var Maped map[string]bool//文件名->是否maped
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -64,7 +66,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{}
 
 	// Your code here.
-
+	fmt.Println("长度", len(files))
+	fmt.Println(files)
 	m.server()
 	return &m
 }

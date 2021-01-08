@@ -23,10 +23,11 @@ type Arg struct {
 
 type Assign struct {
 	//回应时，存储分配的任务
-	Maptask     bool //true:map task flase: reduce task
-	Mapindex    int
-	Reduceindex int
-	Info        string
+	nReduce   int
+	Task      bool
+	Maptask   bool //true:map task flase: reduce task
+	Taskindex int
+	Info      string
 }
 
 // Cook up a unique-ish UNIX-domain socket name

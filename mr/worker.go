@@ -8,6 +8,9 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
+	"strconv"
+	"time"
 )
 
 //
@@ -17,6 +20,12 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -37,8 +46,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the master.
-	ApplyCall(mapf, reducef)
-
+	for {
+		ApplyCall(mapf, reducef)
+	}
 }
 
 //
@@ -53,11 +63,10 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 	args := new(Assign) //实际上worker不需要给信息
 
 	// declare a reply structure.
-	reply := args
+	reply := new(Assign)
 
 	// send the RPC request, wait for the reply.
 	if call("Master.Apply", &args, &reply) {
-		//fmt.Println(reply.Info)
 		if reply.Task {
 			if reply.Maptask {
 				filename := reply.Info
@@ -73,13 +82,60 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 				file.Close()
 				kva := mapf(filename, string(content))
 				intermediate = append(intermediate, kva...)
+
+				tempInter := make([][]KeyValue, 10)
 				// test point ,we will produce all the intermediate to one json file
-				output(intermediate)
+				for _, kv := range intermediate {
+					tempInter[ihash(kv.Key)%reply.NReduce] = append(tempInter[ihash(kv.Key)%reply.NReduce], kv)
+				}
+				for i := 0; i < reply.NReduce; i++ {
+					output(tempInter[i], reply.Taskindex, i)
+				}
+				report := new(Report)
+				infoBack := new(Report) //no need  for info back
+				report.Maptask = true
+				report.Taskindex = reply.Taskindex
+				report.Info = reply.Info
+				call("Master.Jobdone", report, infoBack)
+			} else {
+				//Reduce task
+				intermediate := []KeyValue{}
+				for _, fname := range reply.RedFiles {
+					readf(&intermediate, fname)
+				}
+				//read all the files needed
+				sort.Sort(ByKey(intermediate))
+
+				oname := "./output/mr-out-" + strconv.Itoa(reply.Taskindex)
+				ofile, _ := os.Create(oname)
+				i := 0
+				for i < len(intermediate) {
+					j := i + 1
+					for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+						j++
+					}
+					values := []string{}
+					for k := i; k < j; k++ {
+						values = append(values, intermediate[k].Value)
+					}
+					output := reducef(intermediate[i].Key, values)
+
+					// this is the correct format for each line of Reduce output.
+					fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+					i = j
+				}
+
+				ofile.Close()
 			}
+		} else {
+			//didnt get task,then fucking sleep
+			time.Sleep(time.Duration(3) * time.Second)
 		}
 	} else {
 		//server shut down all works finished
 		fmt.Println("Server down,Worker quit")
+
 	}
 
 }
@@ -102,13 +158,12 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err == nil {
 		return true
 	}
-
 	fmt.Println(err)
 	return false
 }
 
-func output(intermediate []KeyValue) bool {
-	filename := "test.json"
+func output(intermediate []KeyValue, mapi int, redi int) bool {
+	filename := "./output/mr-" + strconv.Itoa(mapi) + "-" + strconv.Itoa(redi) + ".json"
 	fp, err := os.Create(filename)
 	if err != nil {
 		fmt.Println("Create file failed! ", err)
@@ -122,6 +177,26 @@ func output(intermediate []KeyValue) bool {
 			fmt.Println("output failed,err:", err)
 			return false
 		}
+	}
+	return true
+}
+
+func readf(intermediate *[]KeyValue, fname string) bool {
+	filename := "./output/" + fname
+	fp, err := os.Open(filename)
+	if err != nil {
+		fmt.Println("error when open file " + filename)
+		return false
+	}
+	defer fp.Close()
+
+	dec := json.NewDecoder(fp)
+	for {
+		var kv KeyValue
+		if err := dec.Decode(&kv); err != nil {
+			break
+		}
+		*intermediate = append(*intermediate, kv)
 	}
 	return true
 }

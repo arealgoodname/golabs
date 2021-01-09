@@ -21,13 +21,20 @@ import (
 type Arg struct {
 }
 
+type Report struct {
+	Maptask   bool
+	Taskindex int
+	Info      string
+}
+
 type Assign struct {
 	//回应时，存储分配的任务
-	nReduce   int
+	NReduce   int
 	Task      bool
 	Maptask   bool //true:map task flase: reduce task
 	Taskindex int
-	Info      string
+	Info      string   //map file name
+	RedFiles  []string // reduce file names
 }
 
 // Cook up a unique-ish UNIX-domain socket name

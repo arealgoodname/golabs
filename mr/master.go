@@ -57,8 +57,10 @@ func (m *Master) Apply(args *Assign, reply *Assign) error {
 					reply.Info = fname
 					reply.NReduce = m.NReduce
 					m.Mapindex++
-					fmt.Println("assign maptask " + strconv.Itoa(reply.Taskindex))
+					fmt.Println("assign maptask " + strconv.Itoa(reply.Taskindex) + reply.Info)
 					m.Mu.Unlock()
+
+					go m.WaitCheck(reply)
 					return nil
 				}
 			}
@@ -79,6 +81,7 @@ func (m *Master) Apply(args *Assign, reply *Assign) error {
 					m.Redindex++
 					fmt.Println("assign redtask " + strconv.Itoa(reply.Taskindex))
 					m.Mu.Unlock()
+					go m.WaitCheck(reply)
 					return nil
 				}
 			}
@@ -125,12 +128,16 @@ func (m *Master) WaitCheck(task *Assign) bool {
 		if task.Maptask {
 			if !m.Maped[task.Info] {
 				//reverse assign
+				fmt.Println("Map task not finished :", task.Info)
 				m.Maping[task.Info] = -1
+				m.Mu.Unlock()
 				return false
 			}
 		} else {
 			if !m.Reded[task.Info] {
+				fmt.Println("Reduce task not finished :", task.Info)
 				m.Reding[task.Info] = -1
+				m.Mu.Unlock()
 				return false
 			}
 		}
@@ -206,8 +213,6 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{}
 
 	// Your code here.
-	fmt.Println("长度", len(files))
-	fmt.Println(files)
 
 	//initiating maped&maping
 	m.Maped = make(map[string]bool)

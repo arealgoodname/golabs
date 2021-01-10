@@ -1,11 +1,13 @@
 package mr
 
 import (
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
+	"math/big"
 	"net/rpc"
 	"os"
 	"sort"
@@ -32,6 +34,20 @@ type ByKey []KeyValue
 func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+func maybeCrash() {
+	max := big.NewInt(1000)
+	rr, _ := crand.Int(crand.Reader, max)
+	if rr.Int64() < 330 {
+		// crash!
+		os.Exit(1)
+	} else if rr.Int64() < 660 {
+		// delay for a while.
+		maxms := big.NewInt(10 * 1000)
+		ms, _ := crand.Int(crand.Reader, maxms)
+		time.Sleep(time.Duration(ms.Int64()) * time.Millisecond)
+	}
+}
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -76,6 +92,7 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 	if call("Master.Apply", &args, &reply) {
 		if reply.Task {
 			if reply.Maptask {
+				fmt.Println("got map task ", reply.Info)
 				filename := reply.Info
 				intermediate := []KeyValue{}
 				file, err := os.Open(filename)
@@ -125,7 +142,7 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 				sort.Sort(ByKey(intermediate))
 
 				oname := "mr-out-" + strconv.Itoa(reply.Taskindex)
-				ofile, _ := ioutil.TempFile("./output/", oname)
+				ofile, _ := ioutil.TempFile("./", oname)
 				i := 0
 				for i < len(intermediate) {
 					j := i + 1
@@ -143,6 +160,7 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 
 					i = j
 				}
+
 				defer ofile.Close()
 
 				report := new(Report)
@@ -153,8 +171,9 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 				call("Master.Jobdone", report, infoBack)
 				//handle infoBack
 				if infoBack.Conf {
-					os.Rename("./"+ofile.Name(), "./output/mr-out-"+strconv.Itoa(reply.Taskindex))
+					os.Rename("./"+ofile.Name(), "./mr-out-"+strconv.Itoa(reply.Taskindex))
 				}
+
 			}
 		} else {
 			if reply.Fin {
@@ -195,7 +214,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 func output(intermediate []KeyValue, mapi int, redi int) TempFile {
 	tempfile := TempFile{}
 	filename := "mr-" + strconv.Itoa(mapi) + "-" + strconv.Itoa(redi) + ".json"
-	fp, err := ioutil.TempFile("./output/", filename)
+	fp, err := ioutil.TempFile("./", filename)
 	if err != nil {
 		fmt.Println("Create file failed! ", err)
 		return tempfile
@@ -216,12 +235,12 @@ func output(intermediate []KeyValue, mapi int, redi int) TempFile {
 }
 
 func rename(tf TempFile) bool {
-	os.Rename("./"+tf.Name, "./output/mr-"+strconv.Itoa(tf.Mapi)+"-"+strconv.Itoa(tf.Redi)+".json")
+	os.Rename("./"+tf.Name, "./mr-"+strconv.Itoa(tf.Mapi)+"-"+strconv.Itoa(tf.Redi)+".json")
 	return true
 }
 
 func readf(intermediate *[]KeyValue, fname string) bool {
-	filename := "./output/" + fname
+	filename := "./" + fname
 	fp, err := os.Open(filename)
 	if err != nil {
 		fmt.Println("error when open file " + filename)

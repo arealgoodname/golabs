@@ -18,13 +18,14 @@ import (
 
 // Add your RPC definitions here.
 
-type Arg struct {
-}
-
 type Report struct {
 	Maptask   bool
 	Taskindex int
 	Info      string
+}
+
+type Confirm struct {
+	Conf bool
 }
 
 type Assign struct {
@@ -35,6 +36,7 @@ type Assign struct {
 	Taskindex int
 	Info      string   //map file name
 	RedFiles  []string // reduce file names
+	Fin       bool     //is server shutting down?
 }
 
 // Cook up a unique-ish UNIX-domain socket name

@@ -21,6 +21,12 @@ type KeyValue struct {
 	Value string
 }
 
+type TempFile struct {
+	Name string
+	Mapi int
+	Redi int
+}
+
 type ByKey []KeyValue
 
 func (a ByKey) Len() int           { return len(a) }
@@ -46,9 +52,10 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the master.
-	for {
-		ApplyCall(mapf, reducef)
+	for ApplyCall(mapf, reducef) {
+		time.Sleep(3 * time.Second)
 	}
+	fmt.Println("Server down,worker quit")
 }
 
 //
@@ -57,7 +64,7 @@ func Worker(mapf func(string, string) []KeyValue,
 // the RPC argument and reply types are defined in rpc.go.
 //
 func ApplyCall(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+	reducef func(string, []string) string) bool {
 
 	// declare an argument structure.
 	args := new(Assign) //实际上worker不需要给信息
@@ -88,15 +95,26 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 				for _, kv := range intermediate {
 					tempInter[ihash(kv.Key)%reply.NReduce] = append(tempInter[ihash(kv.Key)%reply.NReduce], kv)
 				}
+
+				tempfiles := []TempFile{}
 				for i := 0; i < reply.NReduce; i++ {
-					output(tempInter[i], reply.Taskindex, i)
+					tf := output(tempInter[i], reply.Taskindex, i)
+					tempfiles = append(tempfiles, tf)
 				}
+
 				report := new(Report)
-				infoBack := new(Report) //no need  for info back
+				infoBack := new(Confirm) //no need  for info back
 				report.Maptask = true
 				report.Taskindex = reply.Taskindex
 				report.Info = reply.Info
 				call("Master.Jobdone", report, infoBack)
+				if infoBack.Conf {
+					//change of names
+					for _, tf := range tempfiles {
+						rename(tf)
+					}
+				}
+
 			} else {
 				//Reduce task
 				intermediate := []KeyValue{}
@@ -106,8 +124,8 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 				//read all the files needed
 				sort.Sort(ByKey(intermediate))
 
-				oname := "./output/mr-out-" + strconv.Itoa(reply.Taskindex)
-				ofile, _ := os.Create(oname)
+				oname := "mr-out-" + strconv.Itoa(reply.Taskindex)
+				ofile, _ := ioutil.TempFile("./output/", oname)
 				i := 0
 				for i < len(intermediate) {
 					j := i + 1
@@ -125,19 +143,31 @@ func ApplyCall(mapf func(string, string) []KeyValue,
 
 					i = j
 				}
+				defer ofile.Close()
 
-				ofile.Close()
+				report := new(Report)
+				infoBack := new(Confirm)
+				report.Maptask = false
+				report.Taskindex = reply.Taskindex
+				report.Info = reply.Info
+				call("Master.Jobdone", report, infoBack)
+				//handle infoBack
+				if infoBack.Conf {
+					os.Rename("./"+ofile.Name(), "./output/mr-out-"+strconv.Itoa(reply.Taskindex))
+				}
 			}
 		} else {
-			//didnt get task,then fucking sleep
-			time.Sleep(time.Duration(3) * time.Second)
+			if reply.Fin {
+				return false
+			} else {
+				time.Sleep(time.Duration(3) * time.Second)
+			}
 		}
 	} else {
 		//server shut down all works finished
-		fmt.Println("Server down,Worker quit")
-
+		return false
 	}
-
+	return true
 }
 
 //
@@ -162,12 +192,13 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	return false
 }
 
-func output(intermediate []KeyValue, mapi int, redi int) bool {
-	filename := "./output/mr-" + strconv.Itoa(mapi) + "-" + strconv.Itoa(redi) + ".json"
-	fp, err := os.Create(filename)
+func output(intermediate []KeyValue, mapi int, redi int) TempFile {
+	tempfile := TempFile{}
+	filename := "mr-" + strconv.Itoa(mapi) + "-" + strconv.Itoa(redi) + ".json"
+	fp, err := ioutil.TempFile("./output/", filename)
 	if err != nil {
 		fmt.Println("Create file failed! ", err)
-		return false
+		return tempfile
 	}
 	defer fp.Close()
 	enc := json.NewEncoder(fp)
@@ -175,9 +206,17 @@ func output(intermediate []KeyValue, mapi int, redi int) bool {
 		err := enc.Encode(&kv)
 		if err != nil {
 			fmt.Println("output failed,err:", err)
-			return false
+			return tempfile
 		}
 	}
+	tempfile.Name = fp.Name()
+	tempfile.Mapi = mapi
+	tempfile.Redi = redi
+	return tempfile
+}
+
+func rename(tf TempFile) bool {
+	os.Rename("./"+tf.Name, "./output/mr-"+strconv.Itoa(tf.Mapi)+"-"+strconv.Itoa(tf.Redi)+".json")
 	return true
 }
 

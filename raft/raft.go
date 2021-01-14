@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,19 @@ import (
 
 // import "bytes"
 // import "../labgob"
+//state const
+const (
+	Follower  = 0
+	Leader    = 1
+	Candidate = 2
+)
+
+//time interval const
+const (
+	HeartbeatPeriod = int64(time.Millisecond * 200) //200ms
+	ElectTimeMin    = HeartbeatPeriod * 2           //Electimeout :400ms~800ms
+	TickTime        = time.Millisecond * 20         //every 20ms check state
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -63,9 +77,12 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	state        int  //1leader 0follower 2candidate
-	electTimeOut int  //for how long a candidate will wait before it becomes the leader,if elapsed it will restart voting
-	turncand     bool //need to be a candidate?
+	state    int //1leader 0follower 2candidate
+	LeaderID int //who is current leader
+
+	ElectTimeOut int64 //for how long a candidate will wait before it becomes the leader,if elapsed it will restart voting
+	LastAlive    int64 //last time recieve AppendEntry or send Vote
+	VoteStart    int64 //as candidate,when was the last time start a vote
 
 	//Persistent state
 	currentTerm int //current term
@@ -81,66 +98,139 @@ type Raft struct {
 	matchindex []int
 }
 
+func GetTime() int64 {
+	return time.Now().UnixNano() / 1e6 //millesecond
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
 	term = rf.currentTerm
 	isleader = (rf.state == 1)
+	rf.mu.Unlock()
 	return term, isleader
 }
 
 func (rf *Raft) StateSwitch(toState int) {
+	rf.mu.Lock()
 	switch toState {
-	case 0: //to follower
-		rf.state = 0
-		rf.turncand = true
+	case Follower: //to follower
+		rf.state = Follower
+		rf.votedFor = -1
+		rf.LeaderID = -1
 		rf.RandElecTime()
-	case 1: //to leader
-	case 2:
-		rf.state = 2
-		rf.RandElecTime()
+		rf.LastAlive = GetTime()
+		rf.mu.Unlock()
+		go rf.FollowTimeOut()
+
+	case Leader: //to leader
+		rf.state = Leader
+		rf.mu.Unlock()
+		go rf.Heartbeat()
+
+	case Candidate:
+		rf.state = Candidate
+		rf.LeaderID = -1
+		rf.VoteStart = GetTime()
+		rf.currentTerm++
+		rf.votedFor = rf.me
+		rf.mu.Unlock()
+		go rf.CandiTimeOut()
+		go rf.StartVote()
+	default:
+		fmt.Println("server: ", rf.me, " state error")
+		rf.mu.Unlock()
 	}
-	rf.Raftroutine()
 }
 
 func (rf *Raft) Raftroutine() {
 	//what Raft server do in routine
-	switch rf.state {
-	case 0: //follower
+	for {
+		switch rf.state {
+		case 0: //follower
+			go rf.FollowTimeOut()
+		case 1: //leader
 
-	case 1: //leader
-	case 2: //candidate
-		rf.currentTerm++
-		rf.RandElecTime()
-		rf.StartVote()
+		case 2: //candidate
+			rf.currentTerm++
+			rf.StartVote()
+		}
 	}
 
 }
 
 func (rf *Raft) StartVote() {
-	//candidate start a vote
+	//as candidate start a vote
+	rf.mu.Lock()
 	args := new(RequestVoteArgs)
 	args.CandidateID = rf.me
 	args.Term = rf.currentTerm
 
 	reply := new(RequestVoteReply)
+	rf.mu.Unlock()
 
-	go rf.candcheck()
+	go rf.CandiTimeOut()
+
+	rf.mu.Lock()
 	agree := 1
 	for id := range rf.peers {
-		if id != rf.me && rf.sendRequestVote(id, args, reply) {
-			if reply.VoteGtanted {
-				agree++
+		if id != rf.me {
+			if rf.sendRequestVote(id, args, reply) {
+				if reply.VoteGtanted {
+					agree++
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.mu.Unlock()
+						rf.StateSwitch(Follower)
+						return
+					}
+				}
 			}
 		}
 	}
 
 	if agree > len(rf.peers)/2 {
 		//becomes leader
-		rf.StateSwitch(1)
+		rf.mu.Unlock()
+		rf.StateSwitch(Leader)
+		rf.mu.Lock()
+	}
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) Heartbeat() {
+	rf.mu.Lock()
+	args := new(AppendEntriesArgs)
+	args.Term = rf.currentTerm
+	args.LeaderID = rf.me
+
+	reply := new(AppendEntriesReply)
+	rf.mu.Unlock()
+
+	for {
+		time.Sleep(time.Duration(HeartbeatPeriod))
+
+		rf.mu.Lock()
+		if rf.state == Leader {
+			for id := range rf.peers {
+				if id != rf.me {
+					if rf.sendAppendEntries(id, args, reply) {
+						if !reply.Success && reply.Term > rf.currentTerm {
+							rf.mu.Unlock()
+							rf.StateSwitch(Follower)
+							return
+						}
+					}
+				}
+			}
+		} else {
+			rf.mu.Unlock()
+			break
+		}
 	}
 }
 
@@ -210,45 +300,65 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.turncand = false
+	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
 		reply.VoteGtanted = false
+		reply.Term = rf.currentTerm
 	} else {
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
-			rf.StateSwitch(0) //switch to follower
+			rf.mu.Unlock()
+			rf.StateSwitch(Follower) //switch to follower
+			rf.mu.Lock()
 		}
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
 			reply.VoteGtanted = true
+			rf.votedFor = args.CandidateID
+			rf.LastAlive = GetTime()
 		}
+
 	}
 
 }
 
 func (rf *Raft) RandElecTime() {
-	//500-1000ms ?dont know how to set candtime
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.electTimeOut = r.Int()%500 + 500
+	rf.ElectTimeOut = r.Int63()%ElectTimeMin + ElectTimeMin
 }
 
-func (rf *Raft) turncheck() { //go this func
-	time.Sleep(time.Millisecond * time.Duration(rf.electTimeOut))
-	rf.mu.Lock()
-	if rf.turncand && rf.state == 0 {
-		rf.StateSwitch(2) //turn to a candidate
+func (rf *Raft) FollowTimeOut() { //go this func
+	//time.Sleep(time.Millisecond * time.Duration(rf.ElectTimeOut))
+	for {
+		time.Sleep(TickTime)
+		rf.mu.Lock()
+		if rf.state == Follower {
+			if GetTime()-rf.LastAlive > rf.ElectTimeOut {
+				rf.mu.Unlock()
+				rf.StateSwitch(2)
+			}
+			rf.mu.Unlock()
+		} else {
+			rf.mu.Unlock()
+			break
+		}
 	}
-	rf.mu.Unlock()
 }
 
-func (rf *Raft) candcheck() {
-	time.Sleep(time.Millisecond * time.Duration(rf.electTimeOut))
-	rf.mu.Lock()
-	if rf.state == 2 {
-		rf.mu.Unlock()
-		rf.Raftroutine()
+func (rf *Raft) CandiTimeOut() {
+	for {
+		time.Sleep(TickTime)
+		rf.mu.Lock()
+		if rf.state == Candidate {
+			if GetTime()-rf.VoteStart > rf.ElectTimeOut {
+				rf.mu.Unlock()
+				rf.StateSwitch(2) //start another vote,and increase term
+			}
+			rf.mu.Unlock()
+		} else {
+			rf.mu.Unlock()
+			break
+		}
 	}
-	rf.mu.Unlock()
-
 }
 
 //
@@ -304,10 +414,26 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-
+	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
 		reply.Success = false
+		reply.Term = rf.currentTerm
+	} else {
+		if args.Term > rf.currentTerm {
+			reply.Term = rf.currentTerm
+			rf.mu.Unlock()
+			rf.StateSwitch(Follower)
+			rf.mu.Lock()
+		}
+		if rf.state != Follower {
+			rf.mu.Unlock()
+			rf.StateSwitch(Follower)
+			rf.mu.Lock()
+		}
+		rf.LeaderID = args.LeaderID
+		rf.LastAlive = GetTime()
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -381,7 +507,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.state = 0 //start as a follower
 	rf.RandElecTime()
-	rf.turncand = true
+	rf.LastAlive = GetTime()
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = []Log{}

@@ -36,11 +36,13 @@ const (
 	Candidate = 2
 )
 
+var BasicTime int64
+
 //time interval const
 const (
-	HeartbeatPeriod = int64(time.Millisecond * 200) //200ms
-	ElectTimeMin    = HeartbeatPeriod * 2           //Electimeout :400ms~800ms
-	TickTime        = time.Millisecond * 20         //every 20ms check state
+	HeartbeatPeriod = time.Millisecond * 200 //200ms
+	ElectTimeMin    = HeartbeatPeriod * 2    //Electimeout :400ms~800ms
+	TickTime        = time.Millisecond * 50  //every 20ms check state
 )
 
 //
@@ -99,7 +101,7 @@ type Raft struct {
 }
 
 func GetTime() int64 {
-	return time.Now().UnixNano() / 1e6 //millesecond
+	return time.Now().UnixNano()/1e6 - BasicTime //millesecond
 }
 
 // return currentTerm and whether this server
@@ -117,6 +119,7 @@ func (rf *Raft) GetState() (int, bool) {
 
 func (rf *Raft) StateSwitch(toState int) {
 	rf.mu.Lock()
+	fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " will switch to ", toState)
 	switch toState {
 	case Follower: //to follower
 		rf.state = Follower
@@ -135,7 +138,6 @@ func (rf *Raft) StateSwitch(toState int) {
 	case Candidate:
 		rf.state = Candidate
 		rf.LeaderID = -1
-		rf.VoteStart = GetTime()
 		rf.currentTerm++
 		rf.votedFor = rf.me
 		rf.mu.Unlock()
@@ -147,30 +149,19 @@ func (rf *Raft) StateSwitch(toState int) {
 	}
 }
 
-func (rf *Raft) Raftroutine() {
-	//what Raft server do in routine
-	for {
-		switch rf.state {
-		case 0: //follower
-			go rf.FollowTimeOut()
-		case 1: //leader
-
-		case 2: //candidate
-			rf.currentTerm++
-			rf.StartVote()
-		}
-	}
-
-}
-
 func (rf *Raft) StartVote() {
 	//as candidate start a vote
 	rf.mu.Lock()
+
+	fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " started a vote")
+
 	args := new(RequestVoteArgs)
 	args.CandidateID = rf.me
 	args.Term = rf.currentTerm
 
 	reply := new(RequestVoteReply)
+
+	rf.VoteStart = GetTime()
 	rf.mu.Unlock()
 
 	go rf.CandiTimeOut()
@@ -180,21 +171,25 @@ func (rf *Raft) StartVote() {
 	for id := range rf.peers {
 		if id != rf.me {
 			if rf.sendRequestVote(id, args, reply) {
-				if reply.VoteGtanted {
+				if reply.VoteGranted {
 					agree++
 				} else {
 					if reply.Term > rf.currentTerm {
+						fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, "collecting votes but found a higher peer")
 						rf.mu.Unlock()
 						rf.StateSwitch(Follower)
 						return
 					}
 				}
+			} else {
+				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, "call Request to ", id, " but failed")
 			}
 		}
 	}
 
 	if agree > len(rf.peers)/2 {
 		//becomes leader
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " will be a leader")
 		rf.mu.Unlock()
 		rf.StateSwitch(Leader)
 		rf.mu.Lock()
@@ -212,21 +207,30 @@ func (rf *Raft) Heartbeat() {
 	rf.mu.Unlock()
 
 	for {
-		time.Sleep(time.Duration(HeartbeatPeriod))
+		time.Sleep(HeartbeatPeriod)
 
 		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
 		if rf.state == Leader {
 			for id := range rf.peers {
 				if id != rf.me {
 					if rf.sendAppendEntries(id, args, reply) {
+						fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader,heartbeat sent to ", id, " recieved", reply.Success)
 						if !reply.Success && reply.Term > rf.currentTerm {
+							fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader sending heartbeat,but found higher peer")
 							rf.mu.Unlock()
 							rf.StateSwitch(Follower)
 							return
 						}
+					} else {
+						fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader sent heartbeat to ", id, "but failed")
 					}
 				}
 			}
+			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
 			break
@@ -291,7 +295,7 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	VoteGtanted bool //does the server vote for candidate?
+	VoteGranted bool //does the server vote for candidate?
 	Term        int  //current term ,for candidate to update itself
 }
 
@@ -302,28 +306,30 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
-		reply.VoteGtanted = false
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a lower vote request")
+		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else {
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a higher vote request,will be a follower,now state is ", rf.state)
 			rf.mu.Unlock()
 			rf.StateSwitch(Follower) //switch to follower
 			rf.mu.Lock()
 		}
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
-			reply.VoteGtanted = true
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " voted for ", args.CandidateID)
+			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
 			rf.LastAlive = GetTime()
 		}
-
 	}
-
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) RandElecTime() {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	rf.ElectTimeOut = r.Int63()%ElectTimeMin + ElectTimeMin
+	rf.ElectTimeOut = (r.Int63()/1e6%int64(ElectTimeMin) + int64(ElectTimeMin)) / 1e6
 }
 
 func (rf *Raft) FollowTimeOut() { //go this func
@@ -331,15 +337,21 @@ func (rf *Raft) FollowTimeOut() { //go this func
 	for {
 		time.Sleep(TickTime)
 		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
 		if rf.state == Follower {
 			if GetTime()-rf.LastAlive > rf.ElectTimeOut {
+				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " FollowTimeOut,will be a candidate")
 				rf.mu.Unlock()
 				rf.StateSwitch(2)
+				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
-			break
+			return
 		}
 	}
 }
@@ -348,15 +360,21 @@ func (rf *Raft) CandiTimeOut() {
 	for {
 		time.Sleep(TickTime)
 		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
 		if rf.state == Candidate {
 			if GetTime()-rf.VoteStart > rf.ElectTimeOut {
+				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " CandiTimeOut,will start vote agian")
 				rf.mu.Unlock()
 				rf.StateSwitch(2) //start another vote,and increase term
+				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
 		} else {
 			rf.mu.Unlock()
-			break
+			return
 		}
 	}
 }
@@ -404,7 +422,6 @@ type AppendEntriesArgs struct {
 	//whatever not understood&decided yet
 	PrevLogIndex int
 	PrevLogTerm  int
-	entries      []Log
 	LeaderCommit int //leader's commitIndex
 }
 
@@ -416,20 +433,25 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	if args.Term < rf.currentTerm {
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a lower append from ", args.LeaderID)
 		reply.Success = false
 		reply.Term = rf.currentTerm
 	} else {
 		if args.Term > rf.currentTerm {
 			reply.Term = rf.currentTerm
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a higher append from ", args.LeaderID)
 			rf.mu.Unlock()
 			rf.StateSwitch(Follower)
 			rf.mu.Lock()
 		}
 		if rf.state != Follower {
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " will switch to follwer,recieving append from ", args.LeaderID)
 			rf.mu.Unlock()
 			rf.StateSwitch(Follower)
 			rf.mu.Lock()
 		}
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " recieved heartbeat from", args.LeaderID)
+		reply.Success = true
 		rf.LeaderID = args.LeaderID
 		rf.LastAlive = GetTime()
 	}
@@ -479,6 +501,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+
 }
 
 func (rf *Raft) killed() bool {
@@ -504,8 +527,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	BasicTime = time.Now().UnixNano() / 1e6
 	// Your initialization code here (2A, 2B, 2C).
-	rf.state = 0 //start as a follower
+	rf.state = Follower //start as a follower
+	rf.dead = 0
+	rf.LeaderID = -1
 	rf.RandElecTime()
 	rf.LastAlive = GetTime()
 	rf.currentTerm = 0
@@ -513,6 +539,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []Log{}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	fmt.Println("Make peer:", rf.me, " Electime: ", time.Duration(rf.ElectTimeOut))
+	fmt.Println("Basictime: ", BasicTime, "Ticktime: ", TickTime, "Electimemin: ", time.Duration(ElectTimeMin), "HeartBeatPeriod: ", time.Duration(HeartbeatPeriod))
+	go rf.FollowTimeOut()
 
 	return rf
 }

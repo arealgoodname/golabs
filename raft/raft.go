@@ -110,15 +110,25 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-	rf.mu.Lock()
+	rf.Lock()
 	term = rf.currentTerm
 	isleader = (rf.state == 1)
-	rf.mu.Unlock()
+	rf.Unlock()
 	return term, isleader
 }
 
-func (rf *Raft) StateSwitch(toState int) {
+func (rf *Raft) Lock() {
 	rf.mu.Lock()
+	//fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " locked ")
+}
+
+func (rf *Raft) Unlock() {
+	//fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " unlocked ")
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) StateSwitch(toState int) {
+	rf.Lock()
 	fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " will switch to ", toState)
 	switch toState {
 	case Follower: //to follower
@@ -127,12 +137,13 @@ func (rf *Raft) StateSwitch(toState int) {
 		rf.LeaderID = -1
 		rf.RandElecTime()
 		rf.LastAlive = GetTime()
-		rf.mu.Unlock()
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " switching to follower setting LastAlive as ", GetTime())
+		rf.Unlock()
 		go rf.FollowTimeOut()
 
 	case Leader: //to leader
 		rf.state = Leader
-		rf.mu.Unlock()
+		rf.Unlock()
 		go rf.Heartbeat()
 
 	case Candidate:
@@ -140,101 +151,136 @@ func (rf *Raft) StateSwitch(toState int) {
 		rf.LeaderID = -1
 		rf.currentTerm++
 		rf.votedFor = rf.me
-		rf.mu.Unlock()
-		go rf.CandiTimeOut()
+
+		rf.Unlock()
 		go rf.StartVote()
+		go rf.CandiTimeOut()
 	default:
 		fmt.Println("server: ", rf.me, " state error")
-		rf.mu.Unlock()
+		rf.Unlock()
 	}
 }
 
 func (rf *Raft) StartVote() {
 	//as candidate start a vote
-	rf.mu.Lock()
 
 	fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " started a vote")
 
+	rf.mu.Lock()
 	args := new(RequestVoteArgs)
 	args.CandidateID = rf.me
 	args.Term = rf.currentTerm
-
 	reply := new(RequestVoteReply)
 
+	selfid := rf.me
+
+	fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " set Votestart as", GetTime())
+
+	var agree int32 = 1
+
 	rf.VoteStart = GetTime()
+	peerNum := len(rf.peers)
 	rf.mu.Unlock()
 
-	go rf.CandiTimeOut()
-
-	rf.mu.Lock()
-	agree := 1
-	for id := range rf.peers {
-		if id != rf.me {
-			if rf.sendRequestVote(id, args, reply) {
-				if reply.VoteGranted {
-					agree++
-				} else {
-					if reply.Term > rf.currentTerm {
-						fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, "collecting votes but found a higher peer")
-						rf.mu.Unlock()
-						rf.StateSwitch(Follower)
-						return
-					}
-				}
-			} else {
-				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, "call Request to ", id, " but failed")
-			}
+	for id := 0; id < peerNum; id++ {
+		if id != selfid {
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " send vote request to ", id)
+			go rf.goRequestVote(id, &agree, args, reply)
 		}
 	}
 
-	if agree > len(rf.peers)/2 {
+	time.Sleep(TickTime) //wait for adding agree
+	rf.mu.Lock()
+	if int(agree) > peerNum/2 && rf.state == Candidate {
 		//becomes leader
-		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " will be a leader")
 		rf.mu.Unlock()
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " will be a leader")
 		rf.StateSwitch(Leader)
-		rf.mu.Lock()
+	} else {
+		rf.mu.Unlock()
 	}
-	rf.mu.Unlock()
+
+}
+
+func (rf *Raft) goRequestVote(id int, agree *int32, args *RequestVoteArgs, reply *RequestVoteReply) {
+	if rf.sendRequestVote(id, args, reply) {
+		if reply.VoteGranted {
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " vote  granted ")
+			atomic.AddInt32(agree, 1)
+		} else {
+			rf.mu.Lock()
+			if reply.Term > rf.currentTerm {
+				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, "collecting votes but found a higher peer")
+				rf.mu.Unlock()
+				rf.StateSwitch(Follower)
+			} else {
+				rf.mu.Unlock()
+				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " vote not granted,not due to term")
+			}
+		}
+	} else {
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, "call Request to ", id, " but failed")
+	}
 }
 
 func (rf *Raft) Heartbeat() {
-	rf.mu.Lock()
+	rf.Lock()
 	args := new(AppendEntriesArgs)
 	args.Term = rf.currentTerm
 	args.LeaderID = rf.me
 
 	reply := new(AppendEntriesReply)
-	rf.mu.Unlock()
+
+	peerNum := len(rf.peers)
+	selfid := rf.me
+	rf.Unlock()
 
 	for {
 		time.Sleep(HeartbeatPeriod)
 
 		rf.mu.Lock()
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader,heartbeat woke")
 		if rf.killed() {
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader", " found itself killed,will shut down")
 			rf.mu.Unlock()
 			return
+		} else {
+			rf.mu.Unlock()
 		}
+
+		//fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader,passed kill test")
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " woke and want lock")
+		rf.mu.Lock()
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " woke and got lock")
 		if rf.state == Leader {
-			for id := range rf.peers {
-				if id != rf.me {
-					if rf.sendAppendEntries(id, args, reply) {
-						fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader,heartbeat sent to ", id, " recieved", reply.Success)
-						if !reply.Success && reply.Term > rf.currentTerm {
-							fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader sending heartbeat,but found higher peer")
-							rf.mu.Unlock()
-							rf.StateSwitch(Follower)
-							return
-						}
-					} else {
-						fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader sent heartbeat to ", id, "but failed")
-					}
+			rf.mu.Unlock()
+			for id := 0; id < peerNum; id++ {
+				if id != selfid {
+					fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " about to heartbeat ", id)
+					go rf.goHeartbeat(id, args, reply)
 				}
 			}
-			rf.mu.Unlock()
 		} else {
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " sending heartbeat found itself no longer leader,Heart beat break")
 			rf.mu.Unlock()
 			break
 		}
+	}
+}
+
+func (rf *Raft) goHeartbeat(id int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	if rf.sendAppendEntries(id, args, reply) {
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader,heartbeat sent to ", id, " recieved", reply.Success)
+		rf.mu.Lock()
+		if !reply.Success && reply.Term > rf.currentTerm {
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader sending heartbeat,but found higher peer")
+			rf.mu.Unlock()
+			rf.StateSwitch(Follower)
+		} else {
+			rf.mu.Unlock()
+		}
+	} else {
+		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader sent heartbeat to ", id, "but failed")
 	}
 }
 
@@ -304,18 +350,19 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.mu.Lock()
+	rf.Lock()
 	if args.Term < rf.currentTerm {
 		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a lower vote request")
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
+		rf.Unlock()
 	} else {
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
 			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a higher vote request,will be a follower,now state is ", rf.state)
-			rf.mu.Unlock()
+			rf.Unlock()
 			rf.StateSwitch(Follower) //switch to follower
-			rf.mu.Lock()
+			rf.Lock()
 		}
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
 			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " voted for ", args.CandidateID)
@@ -323,8 +370,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.CandidateID
 			rf.LastAlive = GetTime()
 		}
+		rf.Unlock()
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) RandElecTime() {
@@ -336,21 +383,22 @@ func (rf *Raft) FollowTimeOut() { //go this func
 	//time.Sleep(time.Millisecond * time.Duration(rf.ElectTimeOut))
 	for {
 		time.Sleep(TickTime)
-		rf.mu.Lock()
+		rf.Lock()
 		if rf.killed() {
-			rf.mu.Unlock()
+			rf.Unlock()
 			return
 		}
 		if rf.state == Follower {
 			if GetTime()-rf.LastAlive > rf.ElectTimeOut {
 				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " FollowTimeOut,will be a candidate")
-				rf.mu.Unlock()
+				rf.Unlock()
 				rf.StateSwitch(2)
-				rf.mu.Lock()
+			} else {
+				rf.Unlock()
 			}
-			rf.mu.Unlock()
+
 		} else {
-			rf.mu.Unlock()
+			rf.Unlock()
 			return
 		}
 	}
@@ -359,21 +407,36 @@ func (rf *Raft) FollowTimeOut() { //go this func
 func (rf *Raft) CandiTimeOut() {
 	for {
 		time.Sleep(TickTime)
-		rf.mu.Lock()
+		//fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " candi woke")
+		rf.Lock()
+		//fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " candi got the lock")
 		if rf.killed() {
-			rf.mu.Unlock()
+			//fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " found itself killed")
+			rf.Unlock()
 			return
 		}
+
 		if rf.state == Candidate {
 			if GetTime()-rf.VoteStart > rf.ElectTimeOut {
 				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " CandiTimeOut,will start vote agian")
-				rf.mu.Unlock()
-				rf.StateSwitch(2) //start another vote,and increase term
-				rf.mu.Lock()
+
+				rf.state = Candidate
+				rf.LeaderID = -1
+				rf.currentTerm++
+				rf.votedFor = rf.me
+
+				rf.Unlock()
+				rf.StartVote()
+				//rf.StateSwitch(2) //start another vote,and increase term
+
+			} else {
+				fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " gettime - votestart  = ", GetTime()-rf.VoteStart, " < Electimeout:", rf.ElectTimeOut)
+				rf.Unlock()
 			}
-			rf.mu.Unlock()
+
 		} else {
-			rf.mu.Unlock()
+			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " found itself no longer a candidate,shut down")
+			rf.Unlock()
 			return
 		}
 	}
@@ -431,7 +494,7 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
+	rf.Lock()
 	if args.Term < rf.currentTerm {
 		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a lower append from ", args.LeaderID)
 		reply.Success = false
@@ -440,22 +503,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.Term > rf.currentTerm {
 			reply.Term = rf.currentTerm
 			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " got a higher append from ", args.LeaderID)
-			rf.mu.Unlock()
+			rf.Unlock()
 			rf.StateSwitch(Follower)
-			rf.mu.Lock()
+			rf.Lock()
 		}
 		if rf.state != Follower {
 			fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " will switch to follwer,recieving append from ", args.LeaderID)
-			rf.mu.Unlock()
+			rf.Unlock()
 			rf.StateSwitch(Follower)
-			rf.mu.Lock()
+			rf.Lock()
 		}
 		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " recieved heartbeat from", args.LeaderID)
 		reply.Success = true
 		rf.LeaderID = args.LeaderID
 		rf.LastAlive = GetTime()
 	}
-	rf.mu.Unlock()
+	rf.Unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {

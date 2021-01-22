@@ -62,8 +62,9 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-type Log struct {
-	wtev int
+type LogEntry struct {
+	Term    int
+	Command interface{} //no idea yet
 }
 
 //
@@ -89,7 +90,7 @@ type Raft struct {
 	//Persistent state
 	currentTerm int //current term
 	votedFor    int //vote for who in current term,-1 for not voted yet
-	log         []Log
+	logs        []LogEntry
 
 	//Volatile state
 	commitIndex int //index of hightest log entry known to be commited
@@ -97,7 +98,7 @@ type Raft struct {
 
 	//Volatile State on leaders
 	nextIndex  []int //fig2 state
-	matchindex []int
+	matchIndex []int
 }
 
 func GetTime() int64 {
@@ -151,6 +152,10 @@ func (rf *Raft) StateSwitch(toState int) {
 		rf.LeaderID = -1
 		rf.currentTerm++
 		rf.votedFor = rf.me
+		for i := range rf.nextIndex {
+			rf.nextIndex[i] = len(rf.logs)
+			rf.matchIndex[i] = 0
+		}
 
 		rf.Unlock()
 		go rf.StartVote()
@@ -170,6 +175,8 @@ func (rf *Raft) StartVote() {
 	args := new(RequestVoteArgs)
 	args.CandidateID = rf.me
 	args.Term = rf.currentTerm
+	args.LastLogIndex = len(rf.logs) - 1
+	args.LastLogTerm = rf.logs[args.LastLogIndex].Term
 	reply := new(RequestVoteReply)
 
 	selfid := rf.me
@@ -228,6 +235,7 @@ func (rf *Raft) Heartbeat() {
 	args := new(AppendEntriesArgs)
 	args.Term = rf.currentTerm
 	args.LeaderID = rf.me
+	args.LeaderCommit = rf.commitIndex
 
 	reply := new(AppendEntriesReply)
 
@@ -236,8 +244,6 @@ func (rf *Raft) Heartbeat() {
 	rf.Unlock()
 
 	for {
-		time.Sleep(HeartbeatPeriod)
-
 		rf.mu.Lock()
 		fmt.Println("time:", GetTime(), "   peer", rf.me, " state: ", rf.state, " as leader,heartbeat woke")
 		if rf.killed() {
@@ -265,6 +271,8 @@ func (rf *Raft) Heartbeat() {
 			rf.mu.Unlock()
 			break
 		}
+
+		time.Sleep(HeartbeatPeriod)
 	}
 }
 
@@ -486,6 +494,8 @@ type AppendEntriesArgs struct {
 	PrevLogIndex int
 	PrevLogTerm  int
 	LeaderCommit int //leader's commitIndex
+
+	Entries []LogEntry
 }
 
 type AppendEntriesReply struct {
@@ -541,13 +551,84 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	index := len(rf.logs)
+	term := rf.currentTerm
+	isLeader := (rf.state == Leader)
+
+	if !isLeader {
+		return -1, -1, isLeader
+	}
+	rf.logs = append(rf.logs, LogEntry{term, command})
+
+	//dont know if the leader will respond to client yet
+	for id := range rf.peers {
+		if id != rf.me {
+			go rf.Synchronize(id)
+		}
+	}
+
+	defer rf.UpdateCommit()
 	return index, term, isLeader
+}
+
+func (rf *Raft) Synchronize(id int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if len(rf.logs)-1 >= rf.nextIndex[id] {
+		args := new(AppendEntriesArgs)
+		args.Term = rf.currentTerm
+		args.LeaderID = rf.me
+		args.PrevLogIndex = len(rf.logs) - 2
+		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		args.LeaderCommit = rf.commitIndex
+		args.Entries = rf.logs[rf.nextIndex[id]:]
+
+		reply := new(AppendEntriesReply)
+
+		for rf.state == Leader {
+			if rf.sendAppendEntries(id, args, reply) {
+				if reply.Success {
+					rf.nextIndex[id] += len(args.Entries)
+					rf.matchIndex[id] = rf.nextIndex[id] - 1
+					break
+				} else {
+					rf.nextIndex[id]--
+					args.PrevLogIndex--
+					args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+					args.Entries = rf.logs[rf.nextIndex[id]:]
+				}
+
+			}
+		}
+	}
+}
+
+func (rf *Raft) UpdateCommit() {
+	time.Sleep(TickTime)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for newc := len(rf.logs) - 1; newc > rf.commitIndex; newc-- {
+		commit := 1
+		for id := range rf.peers {
+			if id != rf.me {
+				if rf.matchIndex[id] >= newc {
+					commit++
+				}
+			}
+		}
+		if commit > len(rf.peers)/2 && rf.logs[newc].Term == rf.currentTerm {
+			//newc will be new commitIndex
+			rf.commitIndex = newc
+			break
+		}
+	}
 }
 
 //
@@ -599,7 +680,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.LastAlive = GetTime()
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = []Log{}
+	rf.logs = []LogEntry{}
+	rf.commitIndex = 0 //highest log entry commited
+	rf.lastApplied = 0 //highest log entry applied
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
